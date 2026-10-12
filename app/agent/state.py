@@ -18,7 +18,8 @@ class AgentState(TypedDict, total=False):
     need_chart: bool             # 是否需要画图
 
     # SQL 阶段
-    sql: str
+    sql: str                     # 实际执行的 SQL（可能被补上 LIMIT 兜底）
+    raw_sql: str                 # LLM 原始生成的 SQL（未经包装，用于展示）
     data: list[dict[str, Any]]   # SQL 查询结果
     sql_error: str
 
@@ -64,6 +65,7 @@ def new_state(
         plan=[],
         need_chart=False,
         sql="",
+        raw_sql="",
         data=[],
         sql_error="",
         python_code="",

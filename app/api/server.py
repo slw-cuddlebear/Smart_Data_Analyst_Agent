@@ -104,11 +104,13 @@ class ChatResponse(BaseModel):
     question: str
     plan: list[str]
     steps: list[str]
-    sql: str
+    sql: str                # 实际执行的 SQL（可能被补上 LIMIT 兜底）
+    raw_sql: str            # LLM 原始生成的 SQL，供前端展示
     data: list[dict]
     data_count: int
     data_truncated: bool
     python_result: dict | None
+    chart_type: str | None
     chart_path: str | None
     chart_url: str | None
     conclusion: str
@@ -243,10 +245,12 @@ def chat(req: ChatRequest) -> ChatResponse:
         plan=state.get("plan", []),
         steps=state.get("steps", []),
         sql=state.get("sql", ""),
+        raw_sql=state.get("raw_sql") or state.get("sql", ""),
         data=data,
         data_count=data_count,
         data_truncated=data_truncated,
         python_result=python_result,
+        chart_type=(state.get("chart_type") or None) if chart_url else None,
         chart_path=chart_path or None,
         chart_url=chart_url or None,
         conclusion=state.get("conclusion", ""),

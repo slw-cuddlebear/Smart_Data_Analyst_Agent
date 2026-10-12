@@ -43,13 +43,13 @@
 输出：结论 + 图表 + 数据表 + SQL + 执行步骤
 ```
 
-Agent 使用 **LangGraph** 构建状态机。五个节点通过条件边连接，任一节点失败会**短路**到结论节点，用兜底提示词生成友好错误提示，而不是抛异常给用户。
+Agent 使用 **LangGraph** 构建状态机。六个节点（rewrite → planner → sql → python → chart → conclusion）通过 2 条条件边决定分支：SQL 失败时直接路由到 conclusion，Python 失败或不需要图表时跳过 chart。任一阶段失败都会用兜底提示词生成友好错误提示，而不是把异常抛给用户。
 
 ## 🛠️ 技术栈
 
 | 模块 | 方案 | 说明 |
 |---|---|---|
-| 开发语言 | Python 3.10+ | |
+| 开发语言 | Python 3.11+ | |
 | Agent 编排 | LangGraph 1.x | 状态机 + 条件边 |
 | 大模型 | DeepSeek Chat | 兼容 OpenAI 接口，可替换 |
 | 数据库抽象 | SQLAlchemy 2.x | 支持 SQLite / MySQL / PostgreSQL / DuckDB |
@@ -58,7 +58,7 @@ Agent 使用 **LangGraph** 构建状态机。五个节点通过条件边连接�
 | 可视化 | matplotlib | 自动选图类型 + 中文字体 |
 | 后端服务 | FastAPI + Uvicorn | REST API |
 | 前端 | Vue 3（本地 vendor） | 无构建步骤，开箱即用 |
-| 配置管理 | python-dotenv + pydantic | |
+| 配置管理 | python-dotenv + dataclass | API 层用 pydantic 做请求校验 |
 | 链路追踪 | LangSmith（可选） | APAC 区域 |
 
 ## 🚀 快速开始
@@ -174,20 +174,42 @@ python main.py
 
 交互模式内置命令：exit 退出 / new 新会话 / history 查看历史 / help 帮助。
 
-## 📊 测试情况
+## 📊 测试与验收
 
-在示例数据（500 行销售订单）上验证了以下功能面：
+### 自动化单元测试
 
-### SQL 生成正确性
+`tests/` 下的测试全部**离线可跑**，不需要 API Key、不需要数据库。每次 push / PR 由 GitHub Actions 自动执行（`.github/workflows/tests.yml`）：
+
+```bash
+pip install -r requirements.txt
+pip install pytest ruff
+
+python -m pytest tests/ -v          # 全部为真断言，离线可跑
+ruff check app tests --select F,E9  # 未使用 import / 语法级问题
+```
+
+| 测试文件 | 覆盖内容 |
+|---|---|
+| `tests/test_sql_tool_safety.py` | SQL 只读校验：多语句绕过拦截、写操作拦截、`created_at` 等列名不误杀、注释与字符串剥离、LIMIT 兜底、`raw_sql` 语义 |
+| `tests/test_chart_tool_sandbox.py` | 图表代码沙箱：危险关键字拦截、受限 builtins、pandas/numpy IO 入口封闭、超时保护、危险代码不被执行 |
+| `tests/test_chart_type_infer.py` | 图表类型推断：`kind=` 解析、matplotlib 函数识别、注释/字符串不干扰、退回关键词兜底 |
+| `tests/test_text_utils.py` | 公共文本工具：字符串与注释剥离、语句切分（单一实现，两个工具共用） |
+| `tests/test_registry_paths.py` | 数据源注册表：SQLite 相对路径存储与还原、历史绝对路径兼容、项目外路径保持绝对、真实注册表不含绝对路径 |
+
+### 手工验收记录
+
+以下为在示例数据（500 行销售订单）上**手工验收**的功能面，非自动化测试：
+
+#### SQL 生成正确性
 
 覆盖聚合、分组、条件过滤、日期范围、TopN、多条件叠加等场景。SQLite 的 strftime 与 MySQL 的 DATE_FORMAT 差异由 LLM 根据 schema 自适应，偶有失败通过自我纠错重写。
 
-### 多工具协作
+#### 多工具协作
 
 - SQL 取数 → Python 计算占比、环比、中位数 → 图表渲染，链路贯通
 - SQL 里禁止计算派生指标（如用 AVG 冒充中位数），统一交给 Python 处理
 
-### 多数据源隔离
+#### 多数据源隔离
 
 上传 CSV 后注册为新数据源，验证：
 
@@ -195,7 +217,7 @@ python main.py
 - 切换数据源时，历史对话隔离
 - 删除数据源时对应的历史与 data/uploads/{id}/ 目录一并清理
 
-### 会话记忆改写
+#### 会话记忆改写
 
 | 输入 | 改写结果 |
 |---|---|
@@ -225,7 +247,8 @@ Smart_Data_Analyst_Agent/
 │   ├── tools/                 # Agent 工具集
 │   │   ├── sql_tool.py        # Text-to-SQL + 自我纠错
 │   │   ├── python_tool.py     # 受限沙箱执行 pandas
-│   │   └── chart_tool.py      # 图表代码生成 + matplotlib
+│   │   ├── chart_tool.py      # 图表代码生成 + matplotlib（同级沙箱）
+│   │   └── text_utils.py      # 公共文本处理（字符串/注释剥离、语句切分）
 │   │
 │   ├── db/                    # 数据层
 │   │   ├── registry.py        # 数据源注册表
@@ -272,6 +295,26 @@ Smart_Data_Analyst_Agent/
 | PostgreSQL | postgresql+psycopg2://user:pass@host:5432/db | psycopg2-binary |
 | DuckDB | duckdb:///path/to/file.duckdb | duckdb-engine |
 
+### 路径约定：项目内的 SQLite 存相对路径
+
+`data/datasources.json` 里，**位于项目目录内**的 SQLite 数据源存的是相对路径：
+
+```json
+"url": "sqlite:///data/sample.db"
+```
+
+读取时由 `app/db/registry.py` 统一还原成绝对路径，调用方拿到的连接串始终可直接使用。
+
+这样设计是为了让整个目录**可以整体搬迁**：复制到别的路径、别的机器，或者被别人 clone 下来，
+都不会因为注册表里写死的绝对路径而启动失败（否则会报 `unable to open database file`）。
+首次运行生成的默认注册表同样使用相对路径。
+
+两点边界：
+
+- **项目外**的数据库（例如自带的外部 db 文件）保持绝对路径不变，不做相对化
+- 历史文件里已经写死的绝对路径**仍可正常读取**，并会在下一次写盘时自动规范化成相对路径
+- MySQL / PostgreSQL / DuckDB 等非 SQLite 连接串不做任何处理
+
 ## 🎯 已实现 / 待优化
 
 ### 已实现
@@ -279,7 +322,7 @@ Smart_Data_Analyst_Agent/
 - [x] 自然语言 → SQL → Python → 图表 → 结论 全链路
 - [x] LangGraph 状态机编排 + 条件路由
 - [x] SQL 执行自我纠错（失败自动重写，最多 3 次）
-- [x] 受限沙箱执行 pandas 代码
+- [x] 受限沙箱执行 pandas 与图表代码（黑名单 + 受限 builtins + 超时，见「已知局限」）
 - [x] 自动选择图表类型 + 中文字体
 - [x] 多数据源管理（内置 SQLite + 上传 CSV/Excel）
 - [x] 会话记忆与多轮追问改写
@@ -299,6 +342,34 @@ Smart_Data_Analyst_Agent/
 - [ ] SQL 生成准确率评估集
 - [ ] 前端从历史中间节点续接追问
 - [ ] 用户认证与多租户隔离
+
+## ⚠️ 已知局限
+
+这些是我清楚知道不够硬的地方，写在明面上而不是等人问：
+
+### 沙箱不是真隔离
+
+`python_tool.py` 和 `chart_tool.py` 的沙箱是**进程内**的：正则黑名单 + 白名单 builtins + 受限命名空间 + 超时，**没有**用子进程 / 容器做真正的隔离。因此：
+
+- 黑名单能被绕过（例如把危险方法名拼接后再调用），只挡得住直白写法
+- 超时靠子线程 `join(timeout)`，只能让调用方停止等待，**杀不掉已经在跑的线程**；真隔离需要换成子进程 + 资源限制
+
+正确做法是子进程执行 + 只读挂载 + CPU/内存上限，这块还没做。
+
+### SQL 只读是应用层校验
+
+`is_safe` 做的是关键字黑名单 + 单语句限制 + 兜底 LIMIT，能挡住 `SELECT 1; ATTACH DATABASE ...` 这类多语句绕过和常见写操作，但**数据库连接本身不是只读的**。更硬的做法是：
+
+- SQLite：`file:...?mode=ro` 只读 URI + `PRAGMA query_only=1`
+- MySQL / PostgreSQL：使用只读权限的专用账号
+
+### 其他
+
+- 会话记忆是进程内的（`memory.py` 模块级字典），重启即丢，多 worker 下不一致
+- 无鉴权、无限流，上传接口没有大小上限
+- `requirements.txt` 已按 `.venv` 实际安装版本精确 pin（`==`），但未提供 `requirements-dev.txt`，测试依赖（pytest / ruff）需单独安装
+- `get_llm()` 用 `lru_cache(maxsize=1)` 缓存，`temperature` 参数不参与缓存键，传非 0 值时不会生效（当前调用全部使用默认 0.0，暂无实际影响）
+- 前端展示的是 LLM 原始 SQL（`raw_sql`）；实际执行时会补 LIMIT 兜底，两者不一致时界面会折叠显示实际执行的 SQL
 
 ## 🐛 踩坑与解决
 
@@ -399,6 +470,7 @@ def _stringify(value) -> str:
 - `{"type": "text", "value": "..."}`：标量
 
 前端按 type 分支渲染，`table` 走 HTML 表格（自动按单元格对齐），彻底解决错位。同时前端兼容了旧格式（localStorage 里存的字符串），老历史不会崩。
+
 ## 📝 开发日志
 
 - **Phase 1 - 基础环境**：Python 虚拟环境、依赖安装、DeepSeek API 连通性验证
@@ -412,6 +484,13 @@ def _stringify(value) -> str:
 - **Phase 9 - Web 前端**：FastAPI 服务、单页 Vue 应用、历史持久化
 - **Phase 10 - 工程收尾**：LangSmith 追踪、README、目录整理
 - **Phase 11 - 显示优化**：Python 结果结构化渲染（表格 / JSON / 文本），修复中文对齐问题
+- **Phase 12 - 安全加固与工程化**：
+  - 图表代码执行补齐与 Python 工具同级的防护（静态校验 + 受限 builtins + 封闭 pandas/numpy IO 入口 + 执行超时），并把字符串/注释剥离逻辑抽成 `text_utils` 单一实现
+  - SQL 只读校验增加单语句约束（原先 `SELECT 1; ATTACH DATABASE ...` 可绕过），修正 `created_at` 等列名被误判为写操作的问题，并加 LIMIT 兜底
+  - 数据源注册表改存相对路径，支持目录整体搬迁（原先写死绝对路径，换目录即报 `unable to open database file`）
+  - 补齐离线单元测试与 GitHub Actions（原先无测试、无 CI）
+  - 接出 `chart_type` 与 `raw_sql`，图表卡片显示图类型，SQL 卡片展示 LLM 原始 SQL
+  - 依赖按实际版本锁定，清理未使用依赖
 
 ## 📄 License
 

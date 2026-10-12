@@ -1,5 +1,4 @@
 """把 data/sample.csv 导入 SQLite 的 sales 表"""
-from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import text

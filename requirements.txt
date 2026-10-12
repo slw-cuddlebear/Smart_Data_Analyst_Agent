@@ -1,21 +1,29 @@
-langchain
-langgraph
-langchain-core
-langchain-community
-langchain-experimental
-langchain-openai
-langchain-deepseek
-sqlalchemy
-pymysql
-pandas
-numpy
-matplotlib
-seaborn
-pyecharts
-python-dotenv
-pydantic
-langsmith
-fastapi
-uvicorn[standard]
-openpyxl
-python-multipart
+# 运行时依赖（版本按当前 .venv 实际安装锁定）
+# 安装：pip install -r requirements.txt
+# 测试需要额外安装：pip install pytest
+
+# --- LLM / Agent ---
+langchain-core==1.6.9
+langchain-deepseek==1.1.0
+langchain-openai==1.7.0
+langgraph==1.2.11
+langsmith==0.12.6
+
+# --- 数据层 ---
+SQLAlchemy==2.0.54
+pymysql==1.2.3
+pandas==3.0.6
+numpy==2.4.6
+openpyxl==3.1.5
+
+# --- 可视化 ---
+matplotlib==3.11.2
+
+# --- Web 服务 ---
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32
+
+# --- 配置 ---
+python-dotenv==1.2.3
+pydantic==2.13.5

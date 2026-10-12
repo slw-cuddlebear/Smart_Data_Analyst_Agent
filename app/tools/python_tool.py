@@ -1,6 +1,6 @@
 """Python 代码执行工具：让 LLM 生成 pandas 代码分析 DataFrame"""
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np

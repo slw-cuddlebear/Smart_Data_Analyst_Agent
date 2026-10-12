@@ -3,7 +3,6 @@ import json
 import re
 from typing import Literal
 
-from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.prompts import (
@@ -118,6 +117,7 @@ def sql_node(state: AgentState) -> AgentState:
     result = text_to_sql(question, datasource_id=ds_id)
 
     state["sql"] = result.sql
+    state["raw_sql"] = result.raw_sql
     state["data"] = result.data
     state["sql_error"] = result.error
 
@@ -150,9 +150,6 @@ def chart_node(state: AgentState) -> AgentState:
     if state.get("sql_error"):
         add_step(state, "跳过图表（SQL 失败）")
         return state
-    question = state.get("rewritten_question") or state["question"]
-    result = build_chart(question, state["data"])
-
     question = state.get("rewritten_question") or state["question"]
     result = build_chart(question, state["data"])
 

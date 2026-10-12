@@ -224,7 +224,10 @@
 
         <!-- 图表 -->
         <div v-if="result.chart_url" class="card">
-          <div class="card-title">图表</div>
+          <div class="card-title">
+            图表
+            <span v-if="result.chart_type" class="hint" style="font-weight: normal; margin-left: 8px;">{{ result.chart_type }}</span>
+          </div>
           <img :src="result.chart_url" alt="分析图表" class="chart-img" />
         </div>
 
@@ -277,7 +280,12 @@
         <!-- SQL -->
         <details class="card" open>
           <summary class="card-title">SQL 查询</summary>
-          <pre>{{ result.sql }}</pre>
+          <!-- 展示 LLM 原始 SQL；实际执行时若被补上 LIMIT 兜底，单独折叠说明 -->
+          <pre>{{ result.raw_sql || result.sql }}</pre>
+          <details v-if="result.sql && result.raw_sql && result.sql !== result.raw_sql" style="margin-top: 8px;">
+            <summary class="hint" style="cursor: pointer;">实际执行的 SQL（已自动补 LIMIT 防全表拉取）</summary>
+            <pre style="margin-top: 6px;">{{ result.sql }}</pre>
+          </details>
         </details>
 
         <!-- 执行步骤 -->
