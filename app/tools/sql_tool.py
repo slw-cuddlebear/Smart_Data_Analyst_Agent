@@ -8,12 +8,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agent.prompts import SQL_SYSTEM_PROMPT as SYSTEM_PROMPT
 from app.db.engine import get_all_schemas, run_query
 from app.llm import get_llm
+from app.tools.text_utils import split_statements, strip_strings_and_comments
 
-# 只允许只读查询
+# 写操作关键字。注意用 \b...\b 且不吞掉下划线：
+# re 里 \b 在 "_" 与字母之间不成立，所以 created_at 不会匹配到 create。
 FORBIDDEN_KEYWORDS = re.compile(
-    r"\b(insert|update|delete|drop|truncate|alter|create|replace|grant|revoke)\b",
+    r"\b(insert|update|delete|drop|truncate|alter|create|replace|grant|revoke|"
+    r"attach|detach|pragma|vacuum|reindex|analyze|begin|commit|rollback|"
+    r"savepoint|release|copy|merge|call|do|set|lock|unlock)\b",
     re.IGNORECASE,
 )
+
+# 默认行数上限：防止 SELECT * FROM 大表把内存打满
+DEFAULT_LIMIT = 1000
 
 MAX_RETRY = 3
 
@@ -21,7 +28,8 @@ MAX_RETRY = 3
 @dataclass
 class SQLResult:
     question: str
-    sql: str = ""
+    sql: str = ""                # 实际执行的 SQL（可能被补上 LIMIT 兜底）
+    raw_sql: str = ""            # LLM 原始生成的 SQL，未经包装
     data: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     attempts: int = 0
@@ -55,12 +63,41 @@ def extract_sql(text: str) -> str:
     return text.strip().rstrip(";").strip()
 
 
+def _ensure_limit(sql: str, limit: int = DEFAULT_LIMIT) -> str:
+    """外层没有 LIMIT 时补一个，避免全表拉回内存"""
+    if re.search(r"\blimit\b", strip_strings_and_comments(sql), re.IGNORECASE):
+        return sql
+    return f"SELECT * FROM (\n{sql.rstrip().rstrip(';')}\n) AS _capped LIMIT {limit}"
+
+
 def is_safe(sql: str) -> tuple[bool, str]:
-    stripped = sql.strip().lower()
-    if not stripped.startswith("select") and not stripped.startswith("with"):
+    """只读校验：单语句 + SELECT/WITH 开头 + 无写操作关键字"""
+    plain = strip_strings_and_comments(sql).strip()
+
+    if not plain:
+        return False, "SQL 为空"
+
+    # 1) 拒绝多语句：SELECT 1; ATTACH DATABASE ... 这类绕过全靠这一步
+    statements = split_statements(sql)
+    if len(statements) > 1:
+        return False, "只允许单条 SQL 语句，检测到多条语句（分号分隔）"
+
+    # 2) 必须以 SELECT 或 WITH 开头
+    lowered = plain.lower()
+    if not (lowered.startswith("select") or lowered.startswith("with")):
         return False, "只允许 SELECT 查询"
-    if FORBIDDEN_KEYWORDS.search(sql):
-        return False, "SQL 中包含被禁止的写操作关键字"
+
+    # 3) 写操作关键字（已排除字符串字面量里的误判）
+    hit = FORBIDDEN_KEYWORDS.search(plain)
+    if hit:
+        return False, f"SQL 中包含被禁止的写操作关键字：{hit.group(0).upper()}"
+
+    # 4) WITH 后面必须跟 SELECT，不能是 WITH ... DELETE/UPDATE
+    if lowered.startswith("with"):
+        body = lowered
+        if not re.search(r"\)\s*select\b", body) and "select" not in body:
+            return False, "WITH 子句后必须是 SELECT"
+
     return True, ""
 
 
@@ -83,14 +120,20 @@ def text_to_sql(
         resp = llm.invoke(messages)
         sql = extract_sql(resp.content)
         result.sql = sql
+        result.raw_sql = sql
 
         safe, reason = is_safe(sql)
         if not safe:
             result.error = f"SQL 未通过安全校验: {reason}"
             return result
 
+        # 补 LIMIT，防止全表拉回内存
+        capped = _ensure_limit(sql)
+        if capped != sql:
+            result.sql = capped
+
         try:
-            data = run_query(sql, datasource_id=datasource_id)
+            data = run_query(capped, datasource_id=datasource_id)
             result.data = data
             result.error = ""
             return result
