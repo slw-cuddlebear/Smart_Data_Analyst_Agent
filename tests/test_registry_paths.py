@@ -1,12 +1,16 @@
-"""数据源注册表的单元测试（离线，不联网）
+"""数据源注册表的单元测试（离线，不联网，不依赖仓库外的产物）
 
 重点：SQLite 连接串的**相对路径存储**约定。
 
 背景：早期实现把绝对路径写进 data/datasources.json，
 一旦项目换目录/换机器/被 clone，注册表里的路径就全部失效，
 运行时报 "unable to open database file"。
+
+注意：data/sample.db 被 .gitignore 忽略、不随仓库发布，
+因此本文件凡涉及「真实连库」的用例都自带临时库，不依赖它。
 """
 import json
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +21,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import BASE_DIR  # noqa: E402
 from app.db import registry  # noqa: E402
+
+
+# ---------- 测试用数据库（CI 上没有 data/sample.db） ----------
+
+def _make_db(path: Path) -> Path:
+    """建一个带 sales 表的小库，供连通性测试使用"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sales (id INTEGER, region TEXT, amount REAL)")
+    conn.executemany(
+        "INSERT INTO sales VALUES (?, ?, ?)",
+        [(i, f"region{i % 5}", float(i)) for i in range(1, 11)],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.fixture(scope="module")
+def project_db() -> Path:
+    """位于 BASE_DIR 内的测试库（用于验证项目内路径会被相对化）"""
+    db = BASE_DIR / "data" / "_pytest_sample.db"
+    try:
+        yield _make_db(db)
+    finally:
+        db.unlink(missing_ok=True)
+
+
+@pytest.fixture(scope="module")
+def outside_db() -> Path:
+    """位于项目外的测试库（用于验证外部路径不被相对化）"""
+    db = Path(tempfile.mkdtemp()) / "outside.db"
+    try:
+        yield _make_db(db)
+    finally:
+        db.unlink(missing_ok=True)
 
 
 # ---------- 1. 路径转换函数 ----------
@@ -109,32 +149,36 @@ def test_load_returns_absolute_path(temp_registry):
     assert Path(ds.url.replace("sqlite:///", "")).is_absolute()
 
 
-def test_registered_url_can_be_opened(temp_registry):
-    """注册后拿到的 url 必须能真的连上数据库"""
+def test_registered_url_can_be_opened(temp_registry, project_db):
+    """注册后拿到的 url 必须能真的连上数据库
+
+    用 project_db 自带的小库，不依赖 data/sample.db
+    （后者被 .gitignore 忽略，CI checkout 后并不存在）。
+    """
     from sqlalchemy import create_engine, text
 
     registry.register(registry.DataSource(
         id="ds_test",
         name="测试",
         type="sqlite",
-        url=f"sqlite:///{BASE_DIR / 'data' / 'sample.db'}",
+        url=f"sqlite:///{project_db}",
     ))
     ds = registry.get_datasource("ds_test")
     engine = create_engine(ds.url)
     with engine.connect() as conn:
         n = conn.execute(text("select count(*) from sales")).scalar()
     engine.dispose()
-    assert n == 500
+    assert n == 10
 
 
-def test_loads_legacy_absolute_path_file(temp_registry):
+def test_loads_legacy_absolute_path_file(temp_registry, project_db):
     """兼容历史文件：里面存的是绝对路径时也要能读且能连"""
     legacy = {
         "datasources": [{
             "id": "legacy",
             "name": "老数据源",
             "type": "sqlite",
-            "url": f"sqlite:///{BASE_DIR / 'data' / 'sample.db'}",
+            "url": f"sqlite:///{project_db}",
             "builtin": False,
             "created_at": "",
         }]
@@ -145,14 +189,15 @@ def test_loads_legacy_absolute_path_file(temp_registry):
     assert Path(ds.url.replace("sqlite:///", "")).is_absolute()
 
 
-def test_legacy_file_is_normalized_on_next_save(temp_registry):
+def test_legacy_file_is_normalized_on_next_save(temp_registry, project_db):
     """历史绝对路径文件在下次保存时会被自动规范化成相对路径"""
+    rel_of_project_db = project_db.resolve().relative_to(BASE_DIR.resolve()).as_posix()
     legacy = {
         "datasources": [{
             "id": "legacy",
             "name": "老数据源",
             "type": "sqlite",
-            "url": f"sqlite:///{BASE_DIR / 'data' / 'sample.db'}",
+            "url": f"sqlite:///{project_db}",
             "builtin": False,
             "created_at": "",
         }]
@@ -161,12 +206,12 @@ def test_legacy_file_is_normalized_on_next_save(temp_registry):
 
     # 触发一次写盘
     registry.register(registry.DataSource(id="new", name="新", type="sqlite",
-                                         url="sqlite:///data/sample.db"))
+                                         url=f"sqlite:///{rel_of_project_db}"))
     content = temp_registry.read_text(encoding="utf-8")
     assert str(BASE_DIR) not in content
     on_disk = json.loads(content)
     urls = {d["id"]: d["url"] for d in on_disk["datasources"]}
-    assert urls["legacy"] == "sqlite:///data/sample.db"
+    assert urls["legacy"] == f"sqlite:///{rel_of_project_db}"
 
 
 def test_save_does_not_mutate_caller_object(temp_registry):
