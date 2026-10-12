@@ -1,5 +1,18 @@
-"""数据源注册表：读写 data/datasources.json"""
+"""数据源注册表：读写 data/datasources.json
+
+**为什么存相对路径**：早期实现把 SQLAlchemy 连接串原样写进 JSON，
+而 SQLite 连接串里是绝对路径。这样一旦项目换目录、换机器，
+或别人 clone 下来，注册表里记录的路径就全部失效，
+表现为运行时报 "unable to open database file"。
+
+现在约定：
+- 位于项目目录内的 SQLite 路径，**存盘时**转为相对 BASE_DIR 的 POSIX 形式（data/sample.db）
+- **读取时**统一还原成绝对路径，因此调用方拿到的 url 始终可直接 create_engine
+- 不在项目目录内的路径（用户自带的外部 db）保持绝对路径不变
+- MySQL / PostgreSQL 等非 SQLite 连接串不动
+"""
 import json
+import re
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
@@ -12,6 +25,44 @@ from app.config import BASE_DIR
 
 REGISTRY_FILE = BASE_DIR / "data" / "datasources.json"
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"
+
+# 匹配 sqlite:///<path>，且能处理 Windows 盘符
+_SQLITE_URL_RE = re.compile(r"^sqlite:///(?P<path>.+)$")
+
+
+def _to_relative_url(url: str) -> str:
+    """存盘前：项目目录内的 SQLite 绝对路径 → 相对 BASE_DIR 的 POSIX 路径"""
+    m = _SQLITE_URL_RE.match(url or "")
+    if not m:
+        return url
+    raw = m.group("path")
+    # 已是相对路径就不用动
+    if not Path(raw).is_absolute():
+        return url
+    try:
+        rel = Path(raw).resolve().relative_to(BASE_DIR.resolve())
+    except (ValueError, OSError):
+        return url          # 项目外的数据库，保留绝对路径
+    return f"sqlite:///{rel.as_posix()}"
+
+
+def _to_absolute_url(url: str) -> str:
+    """读取后：相对路径 → 绝对路径，保证可以直接 create_engine"""
+    m = _SQLITE_URL_RE.match(url or "")
+    if not m:
+        return url
+    raw = m.group("path")
+    if Path(raw).is_absolute():
+        return url          # 兼容历史数据里的绝对路径
+    return f"sqlite:///{(BASE_DIR / raw).resolve()}"
+
+
+def _resolve_entries(raw: dict) -> dict:
+    """就地还原所有数据源的 url 为绝对路径"""
+    for item in raw.get("datasources", []):
+        if "url" in item:
+            item["url"] = _to_absolute_url(item["url"])
+    return raw
 
 
 @dataclass
@@ -36,7 +87,7 @@ def _load_raw() -> dict:
                     "id": "sample",
                     "name": "示例数据（SQLite）",
                     "type": "sqlite",
-                    "url": f"sqlite:///{BASE_DIR / 'data' / 'sample.db'}",
+                    "url": "sqlite:///data/sample.db",
                     "builtin": True,
                     "created_at": "",
                 }
@@ -46,13 +97,19 @@ def _load_raw() -> dict:
             json.dumps(default, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return default
-    return json.loads(REGISTRY_FILE.read_text(encoding="utf-8"))
+        return _resolve_entries(default)
+    raw = json.loads(REGISTRY_FILE.read_text(encoding="utf-8"))
+    return _resolve_entries(raw)
 
 
 def _save_raw(data: dict) -> None:
+    """写盘前把项目内的 SQLite 绝对路径转成相对路径"""
+    stored = json.loads(json.dumps(data))          # 深拷贝，避免改动调用方对象
+    for item in stored.get("datasources", []):
+        if "url" in item:
+            item["url"] = _to_relative_url(item["url"])
     REGISTRY_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
+        json.dumps(stored, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
